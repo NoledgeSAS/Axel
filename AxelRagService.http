@@ -1,0 +1,6 @@
+@testAgenNewFoundryWay_HostAddress = http://localhost:5080
+
+GET {{testAgenNewFoundryWay_HostAddress}}
+Accept: application/json
+
+###
