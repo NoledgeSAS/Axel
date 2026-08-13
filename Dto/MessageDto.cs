@@ -2,7 +2,7 @@
 using OpenAI.Responses;
 using System.Security.Cryptography.Xml;
 
-namespace testAgenNewFoundryWay.Dto
+namespace AxelRagService.Dto
 {
     public class MessageDto
     {

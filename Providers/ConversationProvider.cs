@@ -3,9 +3,9 @@ using Azure.AI.Projects;
 using Azure.AI.Projects.Agents;
 using Azure.Identity;
 using OpenAI.Responses;
-using testAgenNewFoundryWay.Dto;
+using AxelRagService.Dto;
 
-namespace testAgenNewFoundryWay.Providers
+namespace AxelRagService.Providers
 {
     public class ConversationProvider
     {

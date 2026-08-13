@@ -1,6 +1,6 @@
-@testAgenNewFoundryWay_HostAddress = http://localhost:5080
+@AxelRagService_HostAddress = http://localhost:5080
 
-GET {{testAgenNewFoundryWay_HostAddress}}
+GET {{AxelRagService_HostAddress}}
 Accept: application/json
 
 ###

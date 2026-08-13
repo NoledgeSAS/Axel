@@ -6,12 +6,12 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using OpenAI.Responses;
-using testAgenNewFoundryWay.Dto;
-using testAgenNewFoundryWay.Providers;
+using AxelRagService.Dto;
+using AxelRagService.Providers;
 
 
 
-namespace testAgenNewFoundryWay.Controllers
+namespace AxelRagService.Controllers
 {
     [ApiController]
     [Route("[controller]")]

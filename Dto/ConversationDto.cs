@@ -1,4 +1,4 @@
-﻿namespace testAgenNewFoundryWay.Dto
+﻿namespace AxelRagService.Dto
 {
     public class ConversationDto
     {
