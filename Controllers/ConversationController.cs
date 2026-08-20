@@ -2,8 +2,6 @@
 using Azure.AI.Projects;
 using Azure.AI.Projects.Agents;
 using Azure.Identity;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using OpenAI.Responses;
 using AxelRagService.Dto;
@@ -136,5 +134,61 @@ namespace AxelRagService.Controllers
                 return e.Message;
             }
         }
-    }
+        /// <summary>
+        /// Récupère toutes les conversation pour un utilisateur donné
+        /// </summary>
+        /// <returns></returns>
+		[HttpGet("[action]")]
+		public ActionResult<List<ConversationDto>> GetConversations([FromHeader] string userId)
+        {
+            try
+            {
+                var result  =  ConversationProvider.GetConversations(userId);
+                return Ok(result);
+            }
+            catch (Exception e)
+            {
+                return StatusCode(500, e.ToString());
+			}
+        }
+
+		/// <summary>
+		/// Supprime une conversation pour un utilisateur donné
+		/// </summary>
+		/// <returns></returns>
+		[HttpDelete("[action]")]
+		public ActionResult<List<ConversationDto>> DeleteConversation(string conversationId)
+		{
+			try
+			{
+				ConversationProvider.DeleteConversation(conversationId);
+				return Ok();
+			}
+			catch (Exception e)
+			{
+				return StatusCode(500, e.ToString());
+			}
+		}
+
+
+
+		/// <summary>
+		/// Récupère toutes les conversation pour un utilisateur donné
+		/// </summary>
+		/// <returns></returns>
+		//[HttpGet("[action]")]
+		//public ActionResult<List<ConversationDto>> GetConversationHistory(string conversationId)
+		//{
+		//	try
+		//	{
+		//		var output = ConversationProvider.GetConversationHistory(conversationId);
+		//		return Ok();
+		//	}
+		//	catch (Exception e)
+		//	{
+		//		return StatusCode(500, e.ToString());
+		//	}
+		//}
+
+	}
 }

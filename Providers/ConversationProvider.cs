@@ -4,6 +4,10 @@ using Azure.AI.Projects.Agents;
 using Azure.Identity;
 using OpenAI.Responses;
 using AxelRagService.Dto;
+using Microsoft.OpenApi;
+using System.ClientModel.Primitives;
+using System.Collections.Immutable;
+using System.ClientModel;
 
 namespace AxelRagService.Providers
 {
@@ -86,8 +90,9 @@ namespace AxelRagService.Providers
             ProjectConversationCreationOptions conversationOptions = new ProjectConversationCreationOptions();
             conversationOptions.Metadata["title"] = conversationTitle;
             conversationOptions.Metadata["userId"] = userId;
+			conversationOptions.Metadata["agentId"] = agentName;
 
-            ProjectConversation conversation
+			ProjectConversation conversation
                 = await projectClient.ProjectOpenAIClient.GetProjectConversationsClient().CreateProjectConversationAsync(
                     conversationOptions);
 
@@ -136,5 +141,64 @@ namespace AxelRagService.Providers
             MessageDto messageDto = new(response, agentName);
             return messageDto;
         }
-    }
+
+        /// <summary>
+        /// Récupère toutes les conversation pour un user
+        /// </summary>
+        /// <param name="userId"></param>
+        /// <returns></returns>
+        public static List<ConversationDto> GetConversations(string userId)
+        {
+            AIProjectClient projectClient = new(endpoint: new Uri(endpoint), tokenProvider: new DefaultAzureCredential());
+            ProjectConversationsClient conversationClient = projectClient.ProjectOpenAIClient.GetProjectConversationsClient();
+
+            List<ProjectConversation> conversations = conversationClient.GetProjectConversations().ToList();
+            List<ConversationDto> result = new List<ConversationDto>();
+
+            foreach (ProjectConversation conversation in conversations)
+            {
+                if (conversation.Metadata.TryGetValue("userId", out string? conversationUserId) && conversationUserId == userId)
+                {
+                    string conversationName = conversation.Metadata.TryGetValue("title", out string? title) ? title : "Conversation sans titre";
+                    ConversationDto conversationDto = new()
+                    {
+                        agentId = conversation.Metadata.TryGetValue("agentId", out string? agentId) ? agentId : "",
+                        conversationId = conversation.Id,
+                        name = conversationName
+                    };
+                    result.Add(conversationDto);
+                }
+            }
+
+            return result;
+        }
+		/// <summary>
+		/// Supprime une conversation par son ID
+		/// </summary>
+		/// <param name="convId"></param>
+		public static void DeleteConversation(string convId)
+		{
+			AIProjectClient projectClient = new(endpoint: new Uri(endpoint), tokenProvider: new DefaultAzureCredential());
+			ProjectConversationsClient conversationClient = projectClient.ProjectOpenAIClient.GetProjectConversationsClient();
+            conversationClient.DeleteConversation(convId);
+		}
+
+		//public static List<string> GetConversationHistory(string convId)
+		//{
+		//	AIProjectClient projectClient = new(endpoint: new Uri(endpoint), tokenProvider: new DefaultAzureCredential());
+		//	ProjectConversationsClient conversationClient = projectClient.ProjectOpenAIClient.GetProjectConversationsClient();
+  //          var items = conversationClient.GetProjectConversationItems(convId);
+  //          List<ClientResult> messageDtos = new List<ClientResult>();
+		//	foreach (var item in items)
+		//	{
+		//		ClientResult conversationItem = conversationClient.GetConversationItem(convId, item.Id);
+		//		messageDtos.Add(conversationItem);
+		//	}
+  //          var test = messageDtos.Select(m => m.GetRawResponse().Content);
+
+		//	return new(); ;
+		//}
+	}
+
+  
 }
