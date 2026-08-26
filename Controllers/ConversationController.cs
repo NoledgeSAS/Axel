@@ -17,7 +17,6 @@ namespace AxelRagService.Controllers
     [Route("[controller]")]
     public class ConversationController : CustomController
     {
-        const string endpoint = "https://contoso04-foundry-noledge.services.ai.azure.com/api/projects/contoso04-foundry-project";
 
 		private readonly ILogger<ConversationController> _logger;
 
