@@ -1,0 +1,12 @@
+{
+  "name": "{{AgentName}}",
+  "definition": {
+    "kind": "prompt",
+    "model": "{{ModelDeploymentName}}",
+    "instructions": "{{AgentInstructions}}",
+    "reasoning": {
+      "effort": "low"
+    },
+    "tools": []
+  }
+}
