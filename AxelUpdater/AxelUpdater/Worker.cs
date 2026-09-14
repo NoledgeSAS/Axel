@@ -6,6 +6,8 @@ namespace AxelUpdater
 	{
 		protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 		{
+			logger.LogInformation("Hello world !");
+
 			while (!stoppingToken.IsCancellationRequested)
 			{
 				if (logger.IsEnabled(LogLevel.Information))
