@@ -58,6 +58,10 @@ namespace SyncLabel
 
 		public async Task UpdateClientAsync(Client client)
 		{
+			// TODO : Vérifier le statut de l'indexeur avant de lancer la mise à jour (ex: si l'indexeur est en cours d'exécution, attendre la fin de l'indexation avant de lancer la mise à jour)
+			// TODO : Vérifier le fonctionnement dans le cas d'une monté de version
+			// TODO : Valider le type de doc (pdp...) à extraire de la BDD du client pour ne pas indexer des documents non pertinents (ex: doc de test, doc obsolète, etc.)
+
 			try
 			{
 				// Connexion Azure Search
