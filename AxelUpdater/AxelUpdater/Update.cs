@@ -1,5 +1,7 @@
 ﻿using Azure;
 using Azure.Search.Documents;
+using Azure.Search.Documents.Indexes;
+using Azure.Search.Documents.Indexes.Models;
 using Azure.Search.Documents.Models;
 using Azure.Storage.Blobs;
 using Microsoft.Data.SqlClient;
@@ -64,28 +66,32 @@ namespace SyncLabel
 
 			try
 			{
-				// Connexion Azure Search
-				var searchClient = CnxSearch(client);
-
-				// Récupérer tous les entrées de l'index
-				var titlesInIndex = await GetIndexItemAsync(searchClient);
-				if (titlesInIndex.Count == 0)
+				// Vérifier que l'indexeur est disponible
+				if (await IndexerDispoAsync(client))
 				{
-					Console.WriteLine("Aucun document dans l'index, arrêt du script.");
-					return;
+					// Connexion Azure Search
+					var searchClient = CnxSearch(client);
+
+					// Récupérer tous les entrées de l'index
+					var titlesInIndex = await GetIndexItemAsync(searchClient);
+					if (titlesInIndex.Count == 0)
+					{
+						Console.WriteLine("Aucun document dans l'index, arrêt du script.");
+						return;
+					}
+
+					// Récupérer tous les documents du client
+					var clientDocuments = await GetClientDocuments(client);
+
+					// Ajout dans l'index des documents client manquants
+					await AddMissingDocumentsToIndex(client, clientDocuments, titlesInIndex, searchClient);
+
+					// Mise à jour des informations de l'index à partir des informations de la BDD du client
+					await UpdateIndexFromClientDatabaseAsync(clientDocuments, titlesInIndex, searchClient);
+
+					// Suppression de l'index des documents absents dans la BDD du client en supprimant le blob associé (soft delete)
+					await DeleteOldDocumentsToIndex(client, clientDocuments, titlesInIndex, searchClient);
 				}
-
-				// Récupérer tous les documents du client
-				var clientDocuments = await GetClientDocuments(client);
-
-				// Ajout dans l'index des documents client manquants
-				await AddMissingDocumentsToIndex(client, clientDocuments, titlesInIndex, searchClient);
-
-				// Mise à jour des informations de l'index à partir des informations de la BDD du client
-				await UpdateIndexFromClientDatabaseAsync(clientDocuments, titlesInIndex, searchClient);
-
-				// Suppression de l'index des documents absents dans la BDD du client en supprimant le blob associé (soft delete)
-				await DeleteOldDocumentsToIndex(client, clientDocuments, titlesInIndex, searchClient);	
 			}
 			catch (Exception ex)
 			{
@@ -110,6 +116,68 @@ namespace SyncLabel
 			);
 
 			return searchClient;
+		}
+
+		private async Task<bool> IndexerDispoAsync(Client client)
+		{
+			try
+			{
+				// Créez l'Indexerclient
+				string searchEndpoint = $@"https://{client.IA_SearchAccount}.search.windows.net";
+				var credential = new AzureKeyCredential(client.IA_SearchApiKey);
+				var indexerClient = new SearchIndexerClient(new Uri(searchEndpoint), credential);
+
+				// Listez tous les indexeurs
+				Response<IReadOnlyList<SearchIndexer>> indexers = await indexerClient.GetIndexersAsync();
+
+				// Trouver le nom de l'indexer à utiliser
+				foreach (var indexer in indexers.Value)
+				{
+					Console.WriteLine($"Nom de l'indexeur : {indexer.Name}");
+					Console.WriteLine($"Description : {indexer.Description}");
+					Console.WriteLine($"Status : {indexer.DataSourceName}");
+					Console.WriteLine($"Index : {indexer.TargetIndexName}");
+					Console.WriteLine("---");
+				}
+
+				// Normalement, un seul indexeur par client Noledge
+				if (indexers.Value.Count != 1)
+				{
+					// Erreur
+					return false;
+				}
+				var indexerOne = indexers.Value[0];
+
+				// Lire le statut de l'indexeur
+				Response<SearchIndexerStatus> statusResponse = await indexerClient.GetIndexerStatusAsync(indexerOne.Name);
+				SearchIndexerStatus status = statusResponse.Value;
+
+				// Remonter l'erreur si elle existe
+				if (status.Status == IndexerStatus.Error)
+				{
+					Console.WriteLine("Erreur lors de l'exécution : " + status.LastResult.Errors);
+					// Erreur
+					return false;
+				}
+
+				// L'indexeur est en train d'indexer
+				if (status.Status == IndexerStatus.Running)
+				{
+					// Log l'info Running
+					return false;
+
+				}
+				else
+				{
+					// Log l'info pas running (indeterniné ?)
+					return true;
+				}
+			}
+			catch (Exception ex)
+			{
+				// Erreur
+				return false;
+			}
 		}
 
 		/// <summary>
