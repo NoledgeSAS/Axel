@@ -4,19 +4,20 @@ using Azure.Search.Documents.Indexes;
 using Azure.Search.Documents.Indexes.Models;
 using Azure.Search.Documents.Models;
 using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using Microsoft.Data.SqlClient;
 using Microsoft.SqlServer.Server;
+using Serilog;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SyncLabel
+namespace AxelUpdater
 {
-	// TODO : Ajouter le mecanisme de log
-
-	internal class IndexItem
+	public class IndexItem
 	{
 		public string Uid { get; set; }
 		public string Title { get; set; }
@@ -25,18 +26,18 @@ namespace SyncLabel
 		public string Label { get; set; }
 		public string Path { get; set; }
 
-		public IndexItem(string uid, string title) 
+		public IndexItem(string uid, string title)
 		{
 			Uid = uid;
 			Title = title;
 			DocId = System.IO.Path.GetFileNameWithoutExtension(title);
-			Extension = System.IO.Path.GetExtension(title); 
+			Extension = System.IO.Path.GetExtension(title);
 			Label = string.Empty;
 			Path = string.Empty;
 		}
 	}
 
-	internal class ClientDocument
+	public class ClientDocument
 	{
 		public string DocumentId { get; set; }
 		public string Extension { get; set; }
@@ -51,17 +52,11 @@ namespace SyncLabel
 		}
 	}
 
-	internal class Update
+	public class Update(ILogger<Update> logger)
 	{
-		public Update()
-		{
-
-		}
-
 		public async Task UpdateClientAsync(Client client)
 		{
-			// TODO : Vérifier le statut de l'indexeur avant de lancer la mise à jour (ex: si l'indexeur est en cours d'exécution, attendre la fin de l'indexation avant de lancer la mise à jour)
-			// TODO : Vérifier le fonctionnement dans le cas d'une monté de version
+			// Vérifier le fonctionnement dans le cas d'une monté de version ==> Ajouter la version dans le nom du blob.
 			// TODO : Valider le type de doc (pdp...) à extraire de la BDD du client pour ne pas indexer des documents non pertinents (ex: doc de test, doc obsolète, etc.)
 
 			try
@@ -73,30 +68,50 @@ namespace SyncLabel
 					var searchClient = CnxSearch(client);
 
 					// Récupérer tous les entrées de l'index
-					var titlesInIndex = await GetIndexItemAsync(searchClient);
-					if (titlesInIndex.Count == 0)
+					var titlesInIndex = await GetIndexItemAsync(searchClient, client.DomainId);
+
+					// Supprimer les doublons (qui sont les différentes pages du document)
+					var titlesInIndexSingle = new HashSet<IndexItem>();
+					foreach (var item1 in titlesInIndex)
 					{
-						Console.WriteLine("Aucun document dans l'index, arrêt du script.");
-						return;
+						if (titlesInIndexSingle.Any(item2 => item1.DocId == item2.DocId))
+						{
+							//logger.LogWarning("Doublon trouvé dans l'index pour le client {DomainId} : {DocId} (UID : {Uid})", client.DomainId, item1.DocId, item1.Uid);
+						}
+						else
+						{
+							titlesInIndexSingle.Add(item1);
+						}
 					}
+					logger.LogDebug("{Count} titres distincts trouvés dans l'index sur {Count} après suppression des doublons ({domaineId}).", titlesInIndexSingle.Count, titlesInIndex.Count, client.DomainId);
 
 					// Récupérer tous les documents du client
 					var clientDocuments = await GetClientDocuments(client);
 
 					// Ajout dans l'index des documents client manquants
-					await AddMissingDocumentsToIndex(client, clientDocuments, titlesInIndex, searchClient);
+					bool runIndexer = await AddMissingDocumentsToIndex(client, clientDocuments, titlesInIndexSingle, searchClient);
+					//bool runIndexer = false;
 
 					// Mise à jour des informations de l'index à partir des informations de la BDD du client
 					await UpdateIndexFromClientDatabaseAsync(clientDocuments, titlesInIndex, searchClient);
 
 					// Suppression de l'index des documents absents dans la BDD du client en supprimant le blob associé (soft delete)
-					await DeleteOldDocumentsToIndex(client, clientDocuments, titlesInIndex, searchClient);
+					if (await DeleteOldDocumentsToIndex(client, clientDocuments, titlesInIndexSingle, searchClient))
+					{
+						runIndexer = true;
+					}
+
+					// Lancement de l'indexeur après la mise à jour des blobs
+					if (runIndexer)
+					{
+						await StartIndexerAsync(client);
+					}
+					logger.LogInformation("Mise à jour de l'index terminée pour le client {DomainId}", client.DomainId);
 				}
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"Erreur lors de la mise à jour de l'index : {ex.Message}"); 
-				Console.WriteLine(ex.ToString());
+				logger.LogError(ex, "Erreur lors de la mise à jour de l'index pour le client {DomainId}", client.DomainId);
 				return;
 			}
 		}
@@ -118,64 +133,80 @@ namespace SyncLabel
 			return searchClient;
 		}
 
+		private SearchIndexerClient CnxIndexer(Client client)
+		{
+			// Créez l'IndexerClient
+			string searchEndpoint = $@"https://{client.IA_SearchAccount}.search.windows.net";
+			var credential = new AzureKeyCredential(client.IA_SearchApiKey);
+			return new SearchIndexerClient(new Uri(searchEndpoint), credential);
+		}	
+
+		private async Task<string> IndexerNameAsync(SearchIndexerClient indexerClient, Client client)
+		{
+			// Listez tous les indexeurs
+			Response<IReadOnlyList<SearchIndexer>> indexers = await indexerClient.GetIndexersAsync();
+			// Trouver le nom de l'indexer à utiliser
+			// Normalement, un seul indexeur par client Noledge
+			if (indexers.Value.Count != 1)
+			{
+				logger.LogError("Erreur : {Count} indexeurs trouvés pour le client {DomainId}. Un seul indexeur est attendu.", indexers.Value.Count, client.DomainId);
+				foreach (var indexer in indexers.Value)
+				{
+					logger.LogDebug("Nom de l'indexeur : {Name}, Description : {Description}, Status : {Status}, Index : {Index}", indexer.Name, indexer.Description, indexer.DataSourceName, indexer.TargetIndexName);
+				}
+				return string.Empty;
+			}
+			return indexers.Value[0].Name;
+		}
+
 		private async Task<bool> IndexerDispoAsync(Client client)
 		{
 			try
 			{
-				// Créez l'Indexerclient
-				string searchEndpoint = $@"https://{client.IA_SearchAccount}.search.windows.net";
-				var credential = new AzureKeyCredential(client.IA_SearchApiKey);
-				var indexerClient = new SearchIndexerClient(new Uri(searchEndpoint), credential);
-
-				// Listez tous les indexeurs
-				Response<IReadOnlyList<SearchIndexer>> indexers = await indexerClient.GetIndexersAsync();
-
-				// Trouver le nom de l'indexer à utiliser
-				foreach (var indexer in indexers.Value)
-				{
-					Console.WriteLine($"Nom de l'indexeur : {indexer.Name}");
-					Console.WriteLine($"Description : {indexer.Description}");
-					Console.WriteLine($"Status : {indexer.DataSourceName}");
-					Console.WriteLine($"Index : {indexer.TargetIndexName}");
-					Console.WriteLine("---");
-				}
-
-				// Normalement, un seul indexeur par client Noledge
-				if (indexers.Value.Count != 1)
-				{
-					// Erreur
-					return false;
-				}
-				var indexerOne = indexers.Value[0];
+				// Connexion
+				SearchIndexerClient indexerClient = CnxIndexer(client);
+				string indexerName = await IndexerNameAsync(indexerClient, client);
 
 				// Lire le statut de l'indexeur
-				Response<SearchIndexerStatus> statusResponse = await indexerClient.GetIndexerStatusAsync(indexerOne.Name);
+				Response <SearchIndexerStatus> statusResponse = await indexerClient.GetIndexerStatusAsync(indexerName);
+				
+				statusResponse.Value.LastResult.Errors.ToList().ForEach(error => 
+					logger.LogDebug("Erreur dans l'indexeur pour le client {DomainId} et le doc {Name} : {ErrorMessage}", client.DomainId, error.Name, error.ErrorMessage));
+				statusResponse.Value.LastResult.Warnings.ToList().ForEach(warning => 
+					logger.LogDebug("Avertissement dans l'indexeur pour le client {DomainId} et le doc {Name} : {WarningMessage}", client.DomainId, warning.Name, warning.Message));
+
 				SearchIndexerStatus status = statusResponse.Value;
 
 				// Remonter l'erreur si elle existe
 				if (status.Status == IndexerStatus.Error)
 				{
-					Console.WriteLine("Erreur lors de l'exécution : " + status.LastResult.Errors);
-					// Erreur
+					logger.LogError("Erreur lors de l'exécution de l'indexeur pour le client {DomainId} : {Errors}", client.DomainId, status.LastResult.Errors);
 					return false;
 				}
 
-				// L'indexeur est en train d'indexer
+				// L'indexeur est opérationnel
 				if (status.Status == IndexerStatus.Running)
 				{
-					// Log l'info Running
-					return false;
-
+					if (status.LastResult.Status == IndexerExecutionStatus.InProgress)
+					{
+						logger.LogInformation("L'indexeur pour le client {DomainId} est en cours d'exécution. La mise à jour est abandonnée.", client.DomainId);
+						return false;
+					}
+					else
+					{
+						logger.LogInformation("L'indexeur pour le client {DomainId} est disponible.", client.DomainId);
+						return true;
+					}
 				}
 				else
 				{
-					// Log l'info pas running (indeterniné ?)
-					return true;
+					logger.LogError("L'indexeur pour le client {DomainId} est à l'arret (ou indéterminé).", client.DomainId);
+					return false;
 				}
 			}
 			catch (Exception ex)
 			{
-				// Erreur
+				logger.LogError(ex, "Erreur lors de la vérification du statut de l'indexeur pour le client {DomainId}", client.DomainId);
 				return false;
 			}
 		}
@@ -185,9 +216,9 @@ namespace SyncLabel
 		/// </summary>
 		/// <param name="searchClient"></param>
 		/// <returns></returns>
-		private async Task<HashSet<IndexItem>> GetIndexItemAsync(SearchClient searchClient)
+		private async Task<HashSet<IndexItem>> GetIndexItemAsync(SearchClient searchClient, string domaineId)
 		{
-			Console.WriteLine("Récupération des items dans l'index...");
+			//logger.LogDebug("Récupération des items dans l'index pour {domaineId}...", domaineId);
 
 			var titlesInIndex = new HashSet<IndexItem>();
 			int skip = 0;
@@ -238,22 +269,15 @@ namespace SyncLabel
 				skip += pageSize;
 			} while (count >= pageSize);
 
-			Console.WriteLine($"{titlesInIndex.Count} titres distincts trouvés dans l'index");
+			//logger.LogDebug("{Count} titres distincts trouvés dans l'index ({domaineId}).", titlesInIndex.Count, domaineId);
 
 			return titlesInIndex;
 		}
 
 		private async Task<List<ClientDocument>> GetClientDocuments(Client client)
 		{
-			// Config SQL
-			//string sqlConnection = "Data Source=192.168.1.5;Initial Catalog=RFORCE_DEV;Persist Security Info=True;User ID=EdgeProd;Password=LeCielEstBleu00%;TrustServerCertificate=true";
-			
 			string sqlConnection = client.Cnxstring;
-
-			// TODO : Ajouter des filtres pour ne récupérer que les documents pertinents (ex: date de création, date de modification, Actif etc.) 
-
 			var updates = new List<SearchDocument>();
-
 			using (var conn = new SqlConnection(sqlConnection))
 			{
 				await conn.OpenAsync();
@@ -283,12 +307,17 @@ namespace SyncLabel
 									fi.fileId,
 									fi.Label,
 									fi.Extension,
+									fi.Version,
 									fp.FullPath
 								FROM REF_FILES fi
 								INNER JOIN FolderPath fp ON fi.folderId = fp.folderId
 								WHERE fi.Actif = 1
+								AND fi.WaitingValidation = 0 
+								AND fi.WaitingFileUploading = 0 
+								AND fi.FileType = 'FOLDER' 
+								AND fi.ExpireDate > GETDATE()
+								AND fi.Extension IN ('pdf', 'pptx', 'xls', 'xlsm', 'ppt', 'txt', 'ppsx', 'pptx', 'doc', 'xlsb', 'xspf', 'zip', 'pptm', 'xlsx', 'docx', 'odp')
 				";
-				//				WHERE fi.FileID in ({parameters})
 
 				var cmd = new SqlCommand(query, conn);
 
@@ -298,49 +327,68 @@ namespace SyncLabel
 
 				while (await reader.ReadAsync())
 				{
-					string documentId = reader.GetString(0) + "." + reader.GetString(2); // FileId.Extension
-					string label = reader.GetString(1);                                  // Label
-					string folderFullPath = reader.GetString(3);
+					int version = reader.GetInt32(3); // Version
+					string versionStr = version.ToString("D3"); // Formatage de la version sur 3 chiffres avec des zéros à gauche
+
+					string documentId = reader.GetString(0) + "_" + versionStr + "." + reader.GetString(2); // FileId_Version.Extension
+					string label = reader.GetString(1);  // Label
+					string folderFullPath = reader.GetString(4);
 
 					ClientDocument docClient = new ClientDocument(documentId, reader.GetString(2), label, folderFullPath);
 
 					clientDocuments.Add(docClient);
 				}
 
-				Console.WriteLine($"{clientDocuments.Count} lignes trouvées dans la BDD");
+				logger.LogDebug("{Count} documents trouvés dans la BDD du client {DomainId}", clientDocuments.Count, client.DomainId);
 
 				return clientDocuments;
 			}
 		}
 
-		private async Task AddMissingDocumentsToIndex(Client client, List<ClientDocument> clientDocuments, HashSet<IndexItem> titlesInIndex, SearchClient searchClient)
+		private async Task<bool> AddMissingDocumentsToIndex(Client client, List<ClientDocument> clientDocuments, HashSet<IndexItem> titlesInIndex, SearchClient searchClient)
 		{
+			int nbFileForDebug = 15;
+			bool runIndexer = false;
 			foreach (var clientDoc in clientDocuments)
 			{
-				var indexItem = titlesInIndex.FirstOrDefault(item => item.DocId == clientDoc.DocumentId);// FileId.Extension
+				var indexItem = titlesInIndex.FirstOrDefault(item => item.Title == clientDoc.DocumentId);// FileId.Extension
 				if (indexItem == null)
 				{
 					// Le document du client n'existe pas dans l'index, l'ajouter	
-					Console.WriteLine($"Ajout du document manquant dans l'index : {clientDoc.DocumentId}");
+					logger.LogDebug("Ajout du document manquant dans l'index pour le client {DomainId} : {DocumentId}", client.DomainId, clientDoc.DocumentId);
 
 					string blobName = clientDoc.DocumentId;
-					string filePath = Path.Combine(client.AppPath, "Content", clientDoc.DocumentId);
+					string fileNameWithVersion = Path.GetFileNameWithoutExtension(clientDoc.DocumentId); // FileId_Version.Extension
+					string fileNameWithoutVersion = fileNameWithVersion.Substring(0, fileNameWithVersion.Length-4); // FileId_Version
+
+					string filePath = Path.Combine(client.AppPath, "Content", fileNameWithoutVersion + "." + clientDoc.Extension);
 
 					// Vérifier que le fichier est présent sur le disque avant de l'envoyer dans le blob
 					if (!System.IO.File.Exists(filePath))
 					{
-						Console.WriteLine($"Le fichier {filePath} n'existe pas sur le disque. Ignoré.");
+						logger.LogWarning("Le fichier {FilePath} n'existe pas sur le disque pour le client {DomainId}. Ignoré.", filePath, client.DomainId);
 						continue;
 					}
 
 					// Envoyer le document dans le blob pour l'index
-					await UploadFileToBlobAsync(client, blobName, filePath);	
+					if (await UploadFileToBlobAsync(client, blobName, filePath)) 
+					{ 
+						runIndexer = true; 
+					}
+#if(DEBUG)
+					// Limiter le nombre de logs pour le debug
+					if (nbFileForDebug-- < 0)
+					{
+						return runIndexer;
+					}
+#endif
 				}
 			}
+			return runIndexer;
 		}
 
 		/// <summary>
-		/// Implémenter la mise à jour des informations de l'index à partir des informations de la BDD du client
+		/// Implémenter la mise à jour de l'index à partir des informations de la BDD du client
 		/// </summary>
 		/// <param name="clientDocuments"></param>
 		/// <param name=""></param>
@@ -353,13 +401,15 @@ namespace SyncLabel
 
 			foreach (var clientDoc in clientDocuments)
 			{
-				var indexItem = titlesInIndex.FirstOrDefault(item => item.DocId == clientDoc.DocumentId);
-				if (indexItem != null)
+				//var indexItem = titlesInIndex.FirstOrDefault(item => item.Title == clientDoc.DocumentId);
+				//if (indexItem != null)
+				foreach (var indexItem in titlesInIndex.Where(item => item.Title == clientDoc.DocumentId))
 				{
 					// Comparer les informations et mettre à jour si nécessaire
 					if (indexItem.Label != clientDoc.Label || indexItem.Path != clientDoc.FolderFullPath)
 					{
-						Console.WriteLine($"Mise à jour de l'index pour le document : {clientDoc.DocumentId}");
+						logger.LogDebug("Mise à jour de l'index pour le document {DocumentId} : Label '{OldLabel}' -> '{NewLabel}', Path '{OldPath}' -> '{NewPath}'",
+										clientDoc.DocumentId, indexItem.Label, clientDoc.Label, indexItem.Path, clientDoc.FolderFullPath);
 
 						updates.Add(new SearchDocument
 						{
@@ -375,16 +425,30 @@ namespace SyncLabel
 			// Push des updates
 			if (updates.Count > 0)
 			{
-				await searchClient.MergeOrUploadDocumentsAsync(updates);
-				Console.WriteLine($"\n{updates.Count} entrées d'index mises à jour !");
+				IndexDocumentsResult reponses = await searchClient.MergeOrUploadDocumentsAsync(updates);
+				int ok = 0;
+				int failed = 0;
+				foreach(var reponse in reponses.Results)
+				{
+					if(!reponse.Succeeded)
+					{
+						failed++;
+						logger.LogError("Erreur lors de la mise à jour de l'index pour le document {DocumentId} : {ErrorMessage}", reponse.Key, reponse.ErrorMessage);
+					}
+					else
+					{
+						ok++;
+					}
+				}
+				logger.LogInformation("{Count} entrées d'index traitées : {ok} ok et {failed} échouées", reponses.Results.Count, ok, failed);
 			}
 			else
 			{
-				Console.WriteLine("Aucune entrée d'index à mettre à jour.");
+				logger.LogInformation("Aucune entrée d'index à mettre à jour.");
 			}
 		}
 
-		public async Task UploadFileToBlobAsync(Client client, string blobName, string filePath)
+		public async Task<bool> UploadFileToBlobAsync(Client client, string blobName, string filePath)
 		{
 			string storageAccount = client.IA_StorageAccount;
 			string storageApiKey = client.IA_StorageApiKey;
@@ -406,36 +470,69 @@ namespace SyncLabel
 				// Obtenir un client BlobClient pour le blob cible
 				BlobClient blobClient = containerClient.GetBlobClient(blobName);
 
-				// Télécharger le fichier dans le blob
-				await blobClient.UploadAsync(filePath, overwrite: true);
+				if (blobClient.ExistsAsync().Result)
+				{
+					logger.LogInformation("Le fichier {BlobName} existe déjà dans le blob container pour le client {DomainId}.", blobName, client.DomainId);
+					return false;
+				}
+				else
+				{
+					// Télécharger le fichier dans le blob
+					BlobContentInfo reponse = await blobClient.UploadAsync(filePath, overwrite: true);
 
-				Console.WriteLine($"Fichier {blobName} ajouté au blob avec succès.");
+
+					TimeSpan ts = DateTime.Now - reponse.LastModified.LocalDateTime;
+
+					// NB la reponse ne donne pas d'informatio fiable sur le succès de l'upload, donc on se base sur la version du blob (qui est null sur un blob à créer !)
+					if ((reponse != null) && (ts.Seconds < 59))
+					{
+						logger.LogInformation("Fichier {BlobName} ajouté au blob container avec succès pour le client {DomainId}", blobName, client.DomainId);
+						return true;
+					}
+					else
+					{
+						logger.LogWarning("Le fichier {BlobName} n'a pas été ajouté au blob container pour le client {DomainId}.", blobName, client.DomainId);
+						return false;
+					}
+				}
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"Erreur lors de l'upload du fichier vers le blob : {ex.Message}");
-				Console.WriteLine(ex.ToString());
+				logger.LogError(ex, "Erreur lors de l'upload du fichier {BlobName} vers le blob container pour le client {DomainId}", blobName, client.DomainId);
+				return false;
 			}
 		}
 
-		private async Task DeleteOldDocumentsToIndex(Client client, List<ClientDocument> clientDocuments, HashSet<IndexItem> titlesInIndex, SearchClient searchClient)
+		private async Task<bool> DeleteOldDocumentsToIndex(Client client, List<ClientDocument> clientDocuments, HashSet<IndexItem> titlesInIndex, SearchClient searchClient)
 		{
+			//int nbFileForDebug = 10;
+			bool runIndexer = false;
 			foreach (var item in titlesInIndex)
 			{
-				var doc = clientDocuments.FirstOrDefault(d => d.DocumentId == item.DocId);// FileId.Extension
+				var doc = clientDocuments.FirstOrDefault(d => d.DocumentId == item.Title);// FileId.Extension
 				if (doc == null)
 				{
-					// L'item de l'index n'existe pas dans la BDD du client, le supprimer de l'index et du blob	
-					Console.WriteLine($"Suppression du document manquant dans la BDD du client : {item.DocId}");
+					// L'item de l'index n'existe pas dans la BDD du client, le supprimer du blob container (et donc de l'index)
+					// logger.LogInformation("Suppression du document {DocumentId} du blob container du client {DomainId}", item.DocId, client.DomainId);
 
-					// Envoyer le document dans le blob pour l'index
-					string blobName = item.DocId;
-					await DeleteFileToBlobAsync(client, blobName);
+					// Supprimer le document du blobContainer pour l'index
+					if (await DeleteFileToBlobAsync(client, item.Title))
+					{
+						runIndexer = true;
+					}
+//#if (DEBUG)
+//					// Limiter le nombre de logs pour le debug
+//					if (nbFileForDebug-- < 0)
+//					{
+//						return runIndexer;
+//					}
+//#endif
 				}
 			}
+			return runIndexer;
 		}
 
-		public async Task DeleteFileToBlobAsync(Client client, string blobName)
+		private async Task<bool> DeleteFileToBlobAsync(Client client, string blobName)
 		{
 			string storageAccount = client.IA_StorageAccount;
 			string storageApiKey = client.IA_StorageApiKey;
@@ -455,14 +552,51 @@ namespace SyncLabel
 				BlobClient blobClient = containerClient.GetBlobClient(blobName);
 
 				// Supprimer le fichier du blob
-				await blobClient.DeleteIfExistsAsync();
-
-				Console.WriteLine($"Fichier {blobName} supprimé du blob avec succès.");
+				if (await blobClient.DeleteIfExistsAsync())
+				{
+					logger.LogInformation("Fichier {BlobName} supprimé du blob avec succès pour le client {DomainId}", blobName, client.DomainId);
+					return true;
+				}
+				else
+				{
+					logger.LogWarning("Le fichier {BlobName} n'existe pas dans le blob pour le client {DomainId}.", blobName, client.DomainId);
+					return false;
+				}				
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"Erreur lors de la suppression du fichier du blob : {ex.Message}");
-				Console.WriteLine(ex.ToString());
+				logger.LogError(ex, "Erreur lors de la suppression du fichier {BlobName} du blob pour le client {DomainId}", blobName, client.DomainId);
+				return false;
+			}
+		}
+
+		private async Task<bool> StartIndexerAsync(Client client)
+		{
+			try
+			{
+				// Connexion
+				SearchIndexerClient indexerClient = CnxIndexer(client);
+				string indexerName = await IndexerNameAsync(indexerClient, client);
+
+				// Démarrer l'indexeur
+				var reponse = await indexerClient.RunIndexerAsync(indexerName);
+
+				if (reponse.Status != 202)
+				{
+					logger.LogError("Erreur lors du démarrage de l'indexeur pour le client {DomainId}. Statut : {Status}", client.DomainId, reponse.Status);
+					return false;
+
+				}
+				else
+				{
+					logger.LogInformation("L'indexeur pour le client {DomainId} a été démarré avec succès.", client.DomainId);
+					return true;
+				}
+			}
+			catch (Exception ex)
+			{
+				logger.LogError(ex, "Erreur lors de la vérification du statut de l'indexeur pour le client {DomainId}", client.DomainId);
+				return false;
 			}
 		}
 

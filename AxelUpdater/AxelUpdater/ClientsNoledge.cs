@@ -5,9 +5,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SyncLabel
+namespace AxelUpdater
 {
-	internal class Client
+	public class Client
 	{
 		public string DomainId { get; set; }
 		public string Cnxstring { get; set; }
@@ -31,19 +31,19 @@ namespace SyncLabel
 		}
 	}
 
-	internal class ClientsNoledge
+	public class ClientsNoledge(ILogger<ClientsNoledge> logger)
 	{
-		public ClientsNoledge() { }
-
 		public List<Client> GetClientsNoledge()
 		{
+			// TODO : Mettre dans l'AppSettings.json
 			string neoConnectCnxString = "Data Source=192.168.1.5;Initial Catalog=NeoConnect;Persist Security Info=True;TrustServerCertificate=true;User ID=EdgeProd;Password=LeCielEstBleu00%";
 
 			string sql = $@"SELECT DomainId, CnxString, AppPath FROM Client";
 
-			// TODO : Pour les test on ne prend que RFORCE_DEV
+#if (DEBUG)
+			// Debug : Pour les test on ne prend que RFORCE_DEV
 			sql += $@" WHERE DomainId = 'RFORCE_DEV' ";
-
+#endif
 			List<Client> clients = new List<Client>();
 			try
 			{
@@ -56,16 +56,14 @@ namespace SyncLabel
 						{
 							while (oReader.Read())
 							{
-								//string domainId = SqlHelper.SafeGetString(oReader, "DomainId");
-								//string cnxString = SqlHelper.SafeGetString(oReader, "CnxString");
-								//string appPath = SqlHelper.SafeGetString(oReader, "AppPath");
 								string? domainId = oReader["DomainId"] != DBNull.Value ? oReader["DomainId"].ToString() : string.Empty;
 								string? cnxString = oReader["CnxString"] != DBNull.Value ? oReader["CnxString"].ToString() : string.Empty;
 								string? appPath = oReader["AppPath"] != DBNull.Value ? oReader["AppPath"].ToString() : string.Empty;
 
-								// TODO : Debug : Pour les docs mettre un chemin local
+#if (DEBUG)
+								// Debug : Pour les docs mettre un chemin local
 								appPath = @"E:\ClientsNoledge\RForce_Dev\";
-
+#endif
 								if (string.IsNullOrEmpty(domainId) || string.IsNullOrEmpty(cnxString) || string.IsNullOrEmpty(appPath))
 								{
 									continue; // Skip this record if any of the values are null or empty
@@ -79,10 +77,10 @@ namespace SyncLabel
 			}
 			catch (Exception ex)
 			{
-				//WebLogHelper.WriteErrorLog("GetClientsNoledge::Read", ex, sql);
-				throw new Exception("GetClientsNoledge::Read ");
+				logger.LogError(ex, "Lecture des clients Noledge. SQL={sql}", sql);
+				throw;
 			}
-			Console.WriteLine($"Total clients retrieved: {clients.Count}");
+			logger.LogInformation("Total clients retrieved: {Count}", clients.Count);
 			return clients;
 		}
 
@@ -102,7 +100,6 @@ namespace SyncLabel
 
 			foreach (Client client in clients)
 			{
-				Console.WriteLine($"IA clients : {client.DomainId}  - Début ");
 				try
 				{
 					using (SqlConnection oCnx = new SqlConnection(client.Cnxstring))
@@ -159,12 +156,11 @@ namespace SyncLabel
 				}
 				catch (Exception ex)
 				{
-					//WebLogHelper.WriteErrorLog("GetClientWithIA::Read", ex, sql);
-					throw new Exception("GetClientWithIA::Read ");
+					logger.LogError(ex, "GetClientWithIA::Read. SQL={sql}", sql);
+					throw;
 				}
-				Console.WriteLine($"IA clients : {client.DomainId}  - Fin ");
 			}
-			Console.WriteLine($"Total IA clients retrieved: {iaClients.Count}");
+			logger.LogInformation("Total IA clients retrieved: {Count}", iaClients.Count);
 			return iaClients;
 		}
 

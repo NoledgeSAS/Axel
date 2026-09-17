@@ -1,32 +1,30 @@
-using SyncLabel;
-
 namespace AxelUpdater
 {
-	public class Worker(ILogger<Worker> logger) : BackgroundService
+	public class Worker(ILogger<Worker> logger, ClientsNoledge clients, Update update) : BackgroundService
 	{
 		protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 		{
-			logger.LogInformation("Hello world !");
-
 			while (!stoppingToken.IsCancellationRequested)
 			{
-				if (logger.IsEnabled(LogLevel.Information))
+				logger.LogInformation("Itération d'AxelUpdater à : {time}", DateTimeOffset.Now);
+
+				try
 				{
-					logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
+					// 1 - Récupérer la liste des clients Noledge
+					List<Client> iaClients = clients.GetClientWithIA(clients.GetClientsNoledge());
+
+					// 2- Pour chaque client, créer une instance de la classe Update et exécuter la méthode UpdateClientAsync() pour chaque fichier à synchroniser
+					foreach (Client client in iaClients)
+					{
+						await update.UpdateClientAsync(client);
+					}
+				}
+				catch (Exception ex)
+				{
+					logger.LogError(ex, "An error occurred while updating clients.");
 				}
 
-				// 1 - Récupérer la liste des clients Noledge
-				ClientsNoledge clients = new ClientsNoledge();
-				List<Client> iaClients = clients.GetClientWithIA(clients.GetClientsNoledge());
-
-				// 2- Pour chaque client, créer une instance de la classe Update et exécuter la méthode UpdateClientAsync() pour chaque fichier à synchroniser
-				foreach (Client client in iaClients)
-				{
-					Update update = new Update();
-					await update.UpdateClientAsync(client);
-				}
-
-				await Task.Delay(1000, stoppingToken);
+				await Task.Delay(60*60*1000, stoppingToken); // 60 minutes delay
 			}
 		}
 
@@ -34,7 +32,7 @@ namespace AxelUpdater
 		{
 			if (logger.IsEnabled(LogLevel.Information))
 			{
-				logger.LogInformation("Worker stopping at: {time}", DateTimeOffset.Now);
+				logger.LogInformation("Arret d'AxelUpdater à: {time}", DateTimeOffset.Now);
 			}
 			await base.StopAsync(cancellationToken);
 		}
@@ -43,7 +41,7 @@ namespace AxelUpdater
 		{
 			if (logger.IsEnabled(LogLevel.Information))
 			{
-				logger.LogInformation("Worker ready to start at: {time}", DateTimeOffset.Now);
+				logger.LogInformation("Démarrage d'AxelUpdater à : {time}", DateTimeOffset.Now);
 			}
 			return base.StartAsync(cancellationToken);
 		}
